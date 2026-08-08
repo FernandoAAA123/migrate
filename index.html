@@ -121,47 +121,63 @@ async function migrate(dryRun){
     return pub.publicUrl;
   }
 
-  async function walkBase(basePath){
-    const snap = await get(ref(db, basePath));
-    if(!snap.exists()) return;
-    const channels = snap.val();
-    for(const channelId of Object.keys(channels)){
-      const msgs = channels[channelId];
-      for(const msgId of Object.keys(msgs)){
-        const msg = msgs[msgId];
-        if(!msg) continue;
-        const updates = {};
-        let changed = false;
-        if(msg.imageData){
-          const url = await uploadField(msg.imageData, 'chat-images');
-          if(url){ updates.imageUrl = dryRun ? (msg.imageUrl||null) : url; updates.imageData = dryRun ? msg.imageData : null; changed = true; } else failed++;
-        }
-        if(msg.fileData){
-          const url = await uploadField(msg.fileData, 'chat-files');
-          if(url){ updates.fileUrl = dryRun ? (msg.fileUrl||null) : url; updates.fileData = dryRun ? msg.fileData : null; changed = true; } else failed++;
-        }
-        if(msg.audioData){
-          const url = await uploadField(msg.audioData, 'chat-audio');
-          if(url){ updates.audioUrl = dryRun ? (msg.audioUrl||null) : url; updates.audioData = dryRun ? msg.audioData : null; changed = true; } else failed++;
-        }
-        if(changed){
-          migrated++;
-          print(`  ✅ ${basePath}/${channelId}/${msgId}`);
-          if(!dryRun) await update(ref(db, `${basePath}/${channelId}/${msgId}`), updates);
+  print('Recorriendo state/servers para descubrir canales ...');
+  const serversSnap = await get(ref(db, 'state/servers'));
+  const channelIds = [];
+  if(serversSnap.exists()){
+    const servers = serversSnap.val();
+    for(const srvId of Object.keys(servers)){
+      const srv = servers[srvId];
+      for(const cat of (srv.channels||[])){
+        for(const ch of (cat.children||[])){
+          if(ch && ch.id) channelIds.push(ch.id);
         }
       }
     }
   }
+  print(`Encontrados ${channelIds.length} canales.`);
 
-  print('Recorriendo state/messages ...');
-  await walkBase('state/messages');
-  print('Recorriendo dmMessages ...');
-  await walkBase('dmMessages');
+  for(const channelId of channelIds){
+    const chPath = `state/messages/${channelId}`;
+    let msgs;
+    try{
+      const snap = await get(ref(db, chPath));
+      if(!snap.exists()) continue;
+      msgs = snap.val();
+    }catch(e){
+      print(`  ⚠️ ${chPath}: ${e.message}`);
+      continue;
+    }
+    for(const msgId of Object.keys(msgs)){
+      const msg = msgs[msgId];
+      if(!msg) continue;
+      const updates = {};
+      let changed = false;
+      if(msg.imageData){
+        const url = await uploadField(msg.imageData, 'chat-images');
+        if(url){ updates.imageUrl = dryRun ? (msg.imageUrl||null) : url; updates.imageData = dryRun ? msg.imageData : null; changed = true; } else failed++;
+      }
+      if(msg.fileData){
+        const url = await uploadField(msg.fileData, 'chat-files');
+        if(url){ updates.fileUrl = dryRun ? (msg.fileUrl||null) : url; updates.fileData = dryRun ? msg.fileData : null; changed = true; } else failed++;
+      }
+      if(msg.audioData){
+        const url = await uploadField(msg.audioData, 'chat-audio');
+        if(url){ updates.audioUrl = dryRun ? (msg.audioUrl||null) : url; updates.audioData = dryRun ? msg.audioData : null; changed = true; } else failed++;
+      }
+      if(changed){
+        migrated++;
+        print(`  ✅ ${chPath}/${msgId}`);
+        if(!dryRun) await update(ref(db, `${chPath}/${msgId}`), updates);
+      }
+    }
+  }
 
   print('\n── Resumen ──');
   print(`Mensajes migrados: ${migrated}`);
   print(`Fallidos: ${failed}`);
   print(`Peso ${dryRun?'que se liberaría':'liberado'}: ${(totalBytes/1024/1024).toFixed(2)} MB`);
+  print('\n(Nota: los DMs no se migran con este botón por ahora — las reglas de seguridad de dmMessages requieren conocer cada dmId específico. Avisame si querés que agregue ese paso también.)');
   if(dryRun) print('\nEsto fue una simulación. Click en "Migrar de verdad" para aplicar los cambios.');
 }
 
