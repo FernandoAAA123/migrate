@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Migración Communiter → Supabase Storage</title>
+<style>
+  body{font-family:system-ui,sans-serif;background:#111;color:#eee;max-width:760px;margin:40px auto;padding:0 20px;}
+  h1{font-size:1.3rem;} h2{font-size:1rem;color:#8fb4ff;margin-top:28px;}
+  button{background:#2f6bff;color:#fff;border:none;padding:10px 16px;border-radius:8px;font-size:.95rem;cursor:pointer;margin-right:8px;}
+  button:disabled{opacity:.5;cursor:not-allowed;}
+  button.danger{background:#f43f5e;}
+  #log{background:#000;border-radius:8px;padding:14px;font-family:monospace;font-size:.8rem;white-space:pre-wrap;max-height:420px;overflow:auto;margin-top:16px;}
+  label{display:block;margin:14px 0 4px;font-size:.85rem;color:#aaa;}
+  input[type=email],input[type=password]{width:100%;padding:8px;border-radius:6px;border:1px solid #333;background:#1a1a1a;color:#eee;box-sizing:border-box;}
+  .row{display:flex;gap:10px;align-items:center;margin-top:10px;}
+  .badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:.72rem;background:#333;}
+</style>
+</head>
+<body>
+<h1>🔧 Migración de mensajes viejos → Supabase Storage</h1>
+<p>Esta herramienta busca mensajes en tu Firebase RTDB que todavía tienen imágenes/archivos/audios guardados en base64 (pesados), los sube a Supabase Storage, y reemplaza el campo pesado por una URL liviana. Corre 100% en tu navegador — no requiere Node.js.</p>
+
+<h2>1) Iniciar sesión (con tu cuenta de Communiter)</h2>
+<label>Email</label><input type="email" id="email" placeholder="tu@email.com">
+<label>Contraseña</label><input type="password" id="password">
+<div class="row">
+  <button id="btnLogin">Iniciar sesión</button>
+  <span id="loginStatus" class="badge">no conectado</span>
+</div>
+
+<h2>2) Migrar</h2>
+<div class="row">
+  <button id="btnDryRun">Simular (dry run — no cambia nada)</button>
+  <button id="btnRealRun" class="danger" disabled>Migrar de verdad</button>
+</div>
+<div id="log">Esperando...</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, get, update } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+import { getAuth, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+
+// ── Mismo config que communiter.html ──
+const firebaseConfig = {
+  apiKey: "AIzaSyCmuNNnH9h2ChG0HbP6MBUP5qiC96RFr0s",
+  authDomain: "communiter-chat.firebaseapp.com",
+  databaseURL: "https://communiter-chat-default-rtdb.firebaseio.com",
+  projectId: "communiter-chat",
+  storageBucket: "communiter-chat.firebasestorage.app",
+  messagingSenderId: "806566406912",
+  appId: "1:806566406912:web:662dfc30a4d8b88e0061e5",
+};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getDatabase(app);
+
+// ── Config de Supabase Storage (misma que en communiter.html) ──
+const SUPABASE_URL = "https://qngfevjsufomtcrxuwyp.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFuZ2ZldmpzdWZvbXRjcnh1d3lwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODYyMTM1NjIsImV4cCI6MjEwMTc4OTU2Mn0.5W6tkbZ0wj_FOvrS9jWL2XJje5ol3fPrhETIt0rroeY";
+const SUPABASE_BUCKET = "communiter-uploads";
+
+const log = document.getElementById('log');
+function print(msg){ log.textContent += '\n' + msg; log.scrollTop = log.scrollHeight; }
+
+document.getElementById('btnLogin').onclick = async () => {
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  try{
+    await signInWithEmailAndPassword(auth, email, password);
+    document.getElementById('loginStatus').textContent = '✅ conectado como ' + email;
+    document.getElementById('btnRealRun').disabled = false;
+    print('Sesión iniciada. Ya podés simular o migrar.');
+  }catch(e){
+    document.getElementById('loginStatus').textContent = '⚠️ error de login';
+    print('Error de login: ' + e.message);
+  }
+};
+
+let supabaseClient = null;
+async function getSupabase(){
+  if(supabaseClient) return supabaseClient;
+  await new Promise((res)=>{
+    const s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js';
+    s.onload = res;
+    document.head.appendChild(s);
+  });
+  supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  return supabaseClient;
+}
+
+function dataUrlToBlob(dataUrl){
+  const [meta, b64] = dataUrl.split(',');
+  const mime = /data:(.*?);base64/.exec(meta)?.[1] || 'application/octet-stream';
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], {type:mime});
+}
+function extFromMime(mime){
+  const map={'image/jpeg':'jpg','image/jpg':'jpg','image/png':'png','image/gif':'gif','image/webp':'webp','audio/webm':'webm'};
+  return map[mime] || (mime.split('/')[1]||'bin').split('+')[0];
+}
+
+async function migrate(dryRun){
+  log.textContent = '';
+  print(dryRun ? '── SIMULACIÓN (no sube ni modifica nada) ──' : '── MIGRACIÓN REAL ──');
+  const supabase = dryRun ? null : await getSupabase();
+
+  let totalBytes = 0, migrated = 0, failed = 0;
+
+  async function uploadField(dataUrl, folder){
+    const blob = dataUrlToBlob(dataUrl);
+    totalBytes += blob.size;
+    if(dryRun) return `[simulado ${(blob.size/1024).toFixed(1)}KB]`;
+    const ext = extFromMime(blob.type);
+    const path = `${folder}/${Date.now()}_${Math.random().toString(36).slice(2,8)}.${ext}`;
+    const {data, error} = await supabase.storage.from(SUPABASE_BUCKET).upload(path, blob, {contentType:blob.type});
+    if(error){ print('  ⚠️ ' + error.message); return null; }
+    const {data:pub} = supabase.storage.from(SUPABASE_BUCKET).getPublicUrl(data.path);
+    return pub.publicUrl;
+  }
+
+  async function walkBase(basePath){
+    const snap = await get(ref(db, basePath));
+    if(!snap.exists()) return;
+    const channels = snap.val();
+    for(const channelId of Object.keys(channels)){
+      const msgs = channels[channelId];
+      for(const msgId of Object.keys(msgs)){
+        const msg = msgs[msgId];
+        if(!msg) continue;
+        const updates = {};
+        let changed = false;
+        if(msg.imageData){
+          const url = await uploadField(msg.imageData, 'chat-images');
+          if(url){ updates.imageUrl = dryRun ? (msg.imageUrl||null) : url; updates.imageData = dryRun ? msg.imageData : null; changed = true; } else failed++;
+        }
+        if(msg.fileData){
+          const url = await uploadField(msg.fileData, 'chat-files');
+          if(url){ updates.fileUrl = dryRun ? (msg.fileUrl||null) : url; updates.fileData = dryRun ? msg.fileData : null; changed = true; } else failed++;
+        }
+        if(msg.audioData){
+          const url = await uploadField(msg.audioData, 'chat-audio');
+          if(url){ updates.audioUrl = dryRun ? (msg.audioUrl||null) : url; updates.audioData = dryRun ? msg.audioData : null; changed = true; } else failed++;
+        }
+        if(changed){
+          migrated++;
+          print(`  ✅ ${basePath}/${channelId}/${msgId}`);
+          if(!dryRun) await update(ref(db, `${basePath}/${channelId}/${msgId}`), updates);
+        }
+      }
+    }
+  }
+
+  print('Recorriendo state/messages ...');
+  await walkBase('state/messages');
+  print('Recorriendo dmMessages ...');
+  await walkBase('dmMessages');
+
+  print('\n── Resumen ──');
+  print(`Mensajes migrados: ${migrated}`);
+  print(`Fallidos: ${failed}`);
+  print(`Peso ${dryRun?'que se liberaría':'liberado'}: ${(totalBytes/1024/1024).toFixed(2)} MB`);
+  if(dryRun) print('\nEsto fue una simulación. Click en "Migrar de verdad" para aplicar los cambios.');
+}
+
+document.getElementById('btnDryRun').onclick = () => migrate(true).catch(e=>print('ERROR: '+e.message));
+document.getElementById('btnRealRun').onclick = () => {
+  if(!confirm('¿Seguro? Esto va a subir archivos a Supabase y reescribir mensajes en Firebase. No se puede deshacer automáticamente.')) return;
+  migrate(false).catch(e=>print('ERROR: '+e.message));
+};
+</script>
+</body>
+</html>
