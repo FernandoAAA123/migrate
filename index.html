@@ -221,31 +221,50 @@ async function migrate(dryRun){
   }
 
   // ── Avatares y banners de usuario ──
+  // La regla de Firebase para "users" solo permite leer usuario por usuario
+  // (users/{uid}), no la lista completa de golpe — igual que pasaba con
+  // state/messages. Así que juntamos los UIDs conocidos a partir de los
+  // miembros de cada servidor (que sí pudimos leer completos) y pedimos
+  // cada perfil por su ID exacto.
   print('Recorriendo avatares/banners de usuarios ...');
-  const usersSnap = await get(ref(db, 'users'));
-  if(usersSnap.exists()){
-    const usersObj = usersSnap.val();
-    for(const uid of Object.keys(usersObj)){
-      const u = usersObj[uid];
-      const userUpdates = {};
-      let userChanged = false;
-      if(u.avatarUrl && u.avatarUrl.startsWith('data:')){
-        const url = await uploadField(u.avatarUrl, 'avatars-banners');
-        if(url){ userUpdates.avatarUrl = dryRun ? u.avatarUrl : url; userChanged = true; } else failed++;
-      }
-      if(u.bannerUrl && u.bannerUrl.startsWith('data:')){
-        const url = await uploadField(u.bannerUrl, 'avatars-banners');
-        if(url){ userUpdates.bannerUrl = dryRun ? u.bannerUrl : url; userChanged = true; } else failed++;
-      }
-      if(userChanged){
-        migrated++;
-        print(`  ✅ users/${uid} (avatar/banner)`);
-        if(!dryRun){
-          try{
-            await update(ref(db, `users/${uid}`), userUpdates);
-          }catch(e){
-            print(`  ⚠️ users/${uid}: ${e.message} (puede ser que las reglas de Firebase no dejen editar perfiles ajenos)`);
-          }
+  const knownUids = new Set();
+  for(const srvId of Object.keys(serversObj)){
+    const srv = serversObj[srvId];
+    if(srv.ownerId) knownUids.add(srv.ownerId);
+    for(const m of (srv.members||[])){
+      const uid = m.uid || m.id;
+      if(uid) knownUids.add(uid);
+    }
+  }
+  print(`Encontrados ${knownUids.size} usuarios (a partir de miembros de servidores).`);
+  for(const uid of knownUids){
+    let u;
+    try{
+      const uSnap = await get(ref(db, `users/${uid}`));
+      if(!uSnap.exists()) continue;
+      u = uSnap.val();
+    }catch(e){
+      print(`  ⚠️ users/${uid}: ${e.message}`);
+      continue;
+    }
+    const userUpdates = {};
+    let userChanged = false;
+    if(u.avatarUrl && u.avatarUrl.startsWith('data:')){
+      const url = await uploadField(u.avatarUrl, 'avatars-banners');
+      if(url){ userUpdates.avatarUrl = dryRun ? u.avatarUrl : url; userChanged = true; } else failed++;
+    }
+    if(u.bannerUrl && u.bannerUrl.startsWith('data:')){
+      const url = await uploadField(u.bannerUrl, 'avatars-banners');
+      if(url){ userUpdates.bannerUrl = dryRun ? u.bannerUrl : url; userChanged = true; } else failed++;
+    }
+    if(userChanged){
+      migrated++;
+      print(`  ✅ users/${uid} (avatar/banner)`);
+      if(!dryRun){
+        try{
+          await update(ref(db, `users/${uid}`), userUpdates);
+        }catch(e){
+          print(`  ⚠️ users/${uid}: ${e.message} (puede ser que las reglas de Firebase no dejen editar perfiles ajenos)`);
         }
       }
     }
