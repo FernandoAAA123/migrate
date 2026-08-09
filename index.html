@@ -124,10 +124,10 @@ async function migrate(dryRun){
   print('Recorriendo state/servers para descubrir canales ...');
   const serversSnap = await get(ref(db, 'state/servers'));
   const channelIds = [];
+  const serversObj = serversSnap.exists() ? serversSnap.val() : {};
   if(serversSnap.exists()){
-    const servers = serversSnap.val();
-    for(const srvId of Object.keys(servers)){
-      const srv = servers[srvId];
+    for(const srvId of Object.keys(serversObj)){
+      const srv = serversObj[srvId];
       for(const cat of (srv.channels||[])){
         for(const ch of (cat.children||[])){
           if(ch && ch.id) channelIds.push(ch.id);
@@ -173,8 +173,86 @@ async function migrate(dryRun){
     }
   }
 
+  // ── Emojis, stickers e íconos de servidor ──
+  print('Recorriendo emojis/stickers/íconos de servidores ...');
+  for(const srvId of Object.keys(serversObj)){
+    const srv = serversObj[srvId];
+    const srvUpdates = {};
+    let srvChanged = false;
+
+    // Ícono de servidor (guardado directo como base64 en iconImg)
+    if(srv.iconImg && srv.iconImg.startsWith('data:')){
+      const url = await uploadField(srv.iconImg, 'server-icons');
+      if(url){ srvUpdates.iconImg = dryRun ? srv.iconImg : url; srvChanged = true; print(`  ✅ state/servers/${srvId}/iconImg`); } else failed++;
+    }
+
+    // Emojis personalizados
+    if(Array.isArray(srv.customEmojis) && srv.customEmojis.length){
+      const newEmojis = [...srv.customEmojis];
+      let anyEmojiChanged = false;
+      for(let i=0;i<newEmojis.length;i++){
+        const e = newEmojis[i];
+        if(e && e.url && e.url.startsWith('data:')){
+          const url = await uploadField(e.url, 'emojis');
+          if(url){ newEmojis[i] = {...e, url: dryRun ? e.url : url}; anyEmojiChanged = true; migrated++; print(`  ✅ state/servers/${srvId}/customEmojis[${i}] (:${e.name}:)`); } else failed++;
+        }
+      }
+      if(anyEmojiChanged){ srvUpdates.customEmojis = newEmojis; srvChanged = true; }
+    }
+
+    // Stickers personalizados
+    if(Array.isArray(srv.customStickers) && srv.customStickers.length){
+      const newStickers = [...srv.customStickers];
+      let anyStickerChanged = false;
+      for(let i=0;i<newStickers.length;i++){
+        const s = newStickers[i];
+        if(s && s.url && s.url.startsWith('data:')){
+          const url = await uploadField(s.url, 'stickers');
+          if(url){ newStickers[i] = {...s, url: dryRun ? s.url : url}; anyStickerChanged = true; migrated++; print(`  ✅ state/servers/${srvId}/customStickers[${i}] (${s.name})`); } else failed++;
+        }
+      }
+      if(anyStickerChanged){ srvUpdates.customStickers = newStickers; srvChanged = true; }
+    }
+
+    if(srvChanged){
+      migrated++;
+      if(!dryRun) await update(ref(db, `state/servers/${srvId}`), srvUpdates);
+    }
+  }
+
+  // ── Avatares y banners de usuario ──
+  print('Recorriendo avatares/banners de usuarios ...');
+  const usersSnap = await get(ref(db, 'users'));
+  if(usersSnap.exists()){
+    const usersObj = usersSnap.val();
+    for(const uid of Object.keys(usersObj)){
+      const u = usersObj[uid];
+      const userUpdates = {};
+      let userChanged = false;
+      if(u.avatarUrl && u.avatarUrl.startsWith('data:')){
+        const url = await uploadField(u.avatarUrl, 'avatars-banners');
+        if(url){ userUpdates.avatarUrl = dryRun ? u.avatarUrl : url; userChanged = true; } else failed++;
+      }
+      if(u.bannerUrl && u.bannerUrl.startsWith('data:')){
+        const url = await uploadField(u.bannerUrl, 'avatars-banners');
+        if(url){ userUpdates.bannerUrl = dryRun ? u.bannerUrl : url; userChanged = true; } else failed++;
+      }
+      if(userChanged){
+        migrated++;
+        print(`  ✅ users/${uid} (avatar/banner)`);
+        if(!dryRun){
+          try{
+            await update(ref(db, `users/${uid}`), userUpdates);
+          }catch(e){
+            print(`  ⚠️ users/${uid}: ${e.message} (puede ser que las reglas de Firebase no dejen editar perfiles ajenos)`);
+          }
+        }
+      }
+    }
+  }
+
   print('\n── Resumen ──');
-  print(`Mensajes migrados: ${migrated}`);
+  print(`Elementos migrados: ${migrated}`);
   print(`Fallidos: ${failed}`);
   print(`Peso ${dryRun?'que se liberaría':'liberado'}: ${(totalBytes/1024/1024).toFixed(2)} MB`);
   print('\n(Nota: los DMs no se migran con este botón por ahora — las reglas de seguridad de dmMessages requieren conocer cada dmId específico. Avisame si querés que agregue ese paso también.)');
